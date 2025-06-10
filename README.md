@@ -2,6 +2,8 @@
 
 TrayMp3 is a lightweight MP3 player for Windows that resides in the system tray. It allows users to play, pause, stop, and navigate through MP3 files with simple tray menu controls. The application supports multiple languages and provides quick access to basic playback functions directly from the tray icon.
 
+[By me a coffee](https://buymeacoffee.com/lutischanf)
+
 # Downloads
 - [Github releases](https://github.com/lutischan-ferenc/tray-mp3/releases)
 - [Majorgeeks](https://www.majorgeeks.com/files/details/traymp3.html)
