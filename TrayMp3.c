@@ -57,7 +57,7 @@ enum {
     IDT_TIMER = 2001
 };
 
-static int autoStart = 1;
+static int autoStart = 0;
 
 typedef struct {
     WCHAR menu_playpause[MAX_STRING_LEN];
@@ -1106,6 +1106,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     LoadAutoStartStateFromRegistry();
+    RefreshMenuText();
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
