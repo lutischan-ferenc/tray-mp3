@@ -57,7 +57,7 @@ enum {
     IDT_TIMER = 2001
 };
 
-static int autoStart = 1;
+static int autoStart = 0;
 
 typedef struct {
     WCHAR menu_playpause[MAX_STRING_LEN];
