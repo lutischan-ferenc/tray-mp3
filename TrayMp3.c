@@ -432,67 +432,63 @@ void UpdateTooltip(HWND hwnd) {
 }
 
 void SelectMP3File(HWND hwnd) {
-    OPENFILENAMEA ofn = {0};
-    char szFile[MAX_PATH * 100] = {0};
-    ofn.lStructSize = sizeof(OPENFILENAMEA);
+    OPENFILENAMEW ofn = {0};  // Using wide-char version
+    WCHAR szFile[MAX_PATH * 100] = {0};
+    ofn.lStructSize = sizeof(OPENFILENAMEW);
     ofn.hwndOwner = hwnd;
     ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = "Media Files (*.mp3;*.m3u)\0*.mp3;*.m3u\0MP3 Files (*.mp3)\0*.mp3\0Playlist Files (*.m3u)\0*.m3u\0All Files (*.*)\0*.*\0";
+    ofn.nMaxFile = sizeof(szFile) / sizeof(WCHAR);
+    ofn.lpstrFilter = L"Media Files (*.mp3;*.m3u)\0*.mp3;*.m3u\0MP3 Files (*.mp3)\0*.mp3\0Playlist Files (*.m3u)\0*.m3u\0All Files (*.*)\0*.*\0";
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
 
-    if (GetOpenFileNameA(&ofn)) {
-        // Mindig állítsuk le a jelenlegi lejátszást
+    if (GetOpenFileNameW(&ofn)) {  // Using wide-char version
         mciSendString(L"close mp3", NULL, 0, NULL);
         isPlaying = 0;
         pausedPosition = 0;
         KillTimer(hwnd, IDT_TIMER);
 
-        // Töröljük a jelenlegi lejátszási listát
         trackCount = 0;
         currentTrack = 0;
         mp3File[0] = '\0';
         playlist[0] = '\0';
 
-        char* p = szFile;
-        char* dir = p;
-        p += strlen(p) + 1;
+        WCHAR* p = szFile;
+        WCHAR* dir = p;
+        p += wcslen(p) + 1;
 
-        if (*p == '\0') {
-            // Egyetlen fájl van kiválasztva
-            if (strstr(szFile, ".m3u") || strstr(szFile, ".M3U")) {
-                // M3U lejátszási lista
-                WCHAR wM3UPath[MAX_PATH];
-                MultiByteToWideChar(CP_ACP, 0, szFile, -1, wM3UPath, MAX_PATH);
-                if (ParseM3UFile(wM3UPath)) {
+        if (*p == L'\0') {
+            // Single file selected
+            if (wcsstr(szFile, L".m3u") || wcsstr(szFile, L".M3U")) {
+                // M3U playlist
+                if (ParseM3UFile(szFile)) {
+                    WideCharToMultiByte(CP_UTF8, 0, szFile, -1, playlist, MAX_PATH, NULL, NULL);
                     strncpy(mp3File, playlistFiles[currentTrack], MAX_PATH);
                 }
             } else {
-                // Egyetlen MP3 fájl
-                strncpy(playlistFiles[trackCount], szFile, MAX_PATH);
+                // Single MP3 file
+                WideCharToMultiByte(CP_UTF8, 0, szFile, -1, playlistFiles[trackCount], MAX_PATH, NULL, NULL);
                 trackCount++;
-                strncpy(mp3File, szFile, MAX_PATH);
+                WideCharToMultiByte(CP_UTF8, 0, szFile, -1, mp3File, MAX_PATH, NULL, NULL);
             }
         } else {
-            // Több fájl van kiválasztva
+            // Multiple files selected
             while (*p && trackCount < MAX_TRACKS) {
-                char fullPath[MAX_PATH];
-                snprintf(fullPath, MAX_PATH, "%s\\%s", dir, p);
-                if (strstr(fullPath, ".m3u") || strstr(fullPath, ".M3U")) {
-                    // M3U lejátszási lista
-                    WCHAR wM3UPath[MAX_PATH];
-                    MultiByteToWideChar(CP_ACP, 0, fullPath, -1, wM3UPath, MAX_PATH);
-                    if (ParseM3UFile(wM3UPath)) {
+                WCHAR fullPath[MAX_PATH];
+                _snwprintf(fullPath, MAX_PATH, L"%s\\%s", dir, p);
+
+                if (wcsstr(fullPath, L".m3u") || wcsstr(fullPath, L".M3U")) {
+                    // M3U playlist
+                    if (ParseM3UFile(fullPath)) {
                         strncpy(mp3File, playlistFiles[currentTrack], MAX_PATH);
                         break;
                     }
                 } else {
-                    // MP3 fájl(ok)
-                    strncpy(playlistFiles[trackCount], fullPath, MAX_PATH);
+                    // MP3 file(s)
+                    WideCharToMultiByte(CP_UTF8, 0, fullPath, -1, playlistFiles[trackCount], MAX_PATH, NULL, NULL);
                     trackCount++;
                 }
-                p += strlen(p) + 1;
+                p += wcslen(p) + 1;
             }
 
             if (trackCount > 0 && mp3File[0] == '\0') {
@@ -500,7 +496,6 @@ void SelectMP3File(HWND hwnd) {
             }
         }
 
-        // Indítsuk el az új lejátszást
         if (mp3File[0] != '\0') {
             PlayMP3(hwnd);
         } else {
@@ -516,14 +511,19 @@ void PlayMP3(HWND hwnd) {
     }
 
     if (!isPlaying) {
-        WCHAR command[512];
+        WCHAR wCommand[512];
+        WCHAR wMp3File[MAX_PATH];
+
+        // Convert the file path to wide characters with proper encoding
+        MultiByteToWideChar(CP_UTF8, 0, mp3File, -1, wMp3File, MAX_PATH);
+
         if (pausedPosition == 0) {
             // Initial play or new track
             mciSendString(L"close mp3", NULL, 0, NULL);
-            _snwprintf(command, sizeof(command) / sizeof(command[0]), L"open \"%hs\" type mpegvideo alias mp3", mp3File);
-            if (mciSendString(command, NULL, 0, NULL) == 0) {
+            _snwprintf(wCommand, sizeof(wCommand) / sizeof(wCommand[0]), L"open \"%s\" type mpegvideo alias mp3", wMp3File);
+            if (mciSendString(wCommand, NULL, 0, NULL) == 0) {
                 mciSendString(L"set mp3 time format ms", NULL, 0, NULL);
-                if (isReplay) {  // Mindig állítsd be az ismétlést, ha be van kapcsolva
+                if (isReplay) {
                     mciSendString(L"set mp3 repeat", NULL, 0, NULL);
                 }
                 mciSendString(L"play mp3 notify", NULL, 0, hwnd);
@@ -534,8 +534,8 @@ void PlayMP3(HWND hwnd) {
             }
         } else {
             // Resume from paused position
-            _snwprintf(command, sizeof(command) / sizeof(command[0]), L"play mp3 from %lu notify", pausedPosition);
-            if (mciSendString(command, NULL, 0, hwnd) == 0) {
+            _snwprintf(wCommand, sizeof(wCommand) / sizeof(wCommand[0]), L"play mp3 from %lu notify", pausedPosition);
+            if (mciSendString(wCommand, NULL, 0, hwnd) == 0) {
                 isPlaying = 1;
                 UpdateTooltip(hwnd);
                 SetTimer(hwnd, IDT_TIMER, 1000, NULL);
@@ -940,19 +940,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdateTooltip(GetForegroundWindow());
             break;
         case WM_TIMER:
-            if (wParam == IDT_TIMER && isPlaying) {
-                static DWORD lastPos = 0;
-                DWORD currentPos = 0;
-                WCHAR status[32];
-                if (mciSendString(L"status mp3 position", status, sizeof(status)/sizeof(status[0]), NULL) == 0) {
-                    currentPos = wcstoul(status, NULL, 10);
-                }
-                if (abs((int)currentPos - (int)lastPos) > 1000) { // Frissíts csak 1 másodperces különbsélnél
-                    UpdateTooltip(hwnd);
-                    lastPos = currentPos;
-                }
-            }
-            break;
+    		if (wParam == IDT_TIMER && isPlaying) {
+        		UpdateTooltip(hwnd);  // Simply update every second without position comparison
+    		}
+    		break;
         case MM_MCINOTIFY:
             if (wParam == MCI_NOTIFY_SUCCESSFUL) {
                 if (trackCount > 1) {
