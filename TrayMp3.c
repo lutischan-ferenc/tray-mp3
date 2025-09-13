@@ -42,7 +42,8 @@ enum {
     IDM_NEXT,
     IDM_PREV,
     IDM_STOP,
-    IDM_AUTOSTART = 1012,  // Changed from 1011 to 1012 to avoid conflict
+    IDM_AUTOSTART = 1012,
+    IDM_VOLUME = 1013,
     IDD_ABOUT = 101,
     IDC_WEBSITE = 108,
     IDC_COFFEE,
@@ -54,11 +55,12 @@ enum {
     ID_MENU_LANG_ES = 206,
     ID_MENU_LANG_FR = 207,
     ID_MENU_LANG_RU = 208,
-    IDT_TIMER = 2001
+    IDT_TIMER = 2001,
+    IDC_VOLUME_SLIDER = 3000
 };
 
 static int autoStart = 0;
-
+static int currentVolume = 500;
 typedef struct {
     WCHAR menu_playpause[MAX_STRING_LEN];
     WCHAR menu_open[MAX_STRING_LEN];
@@ -69,6 +71,7 @@ typedef struct {
     WCHAR menu_prev[MAX_STRING_LEN];
     WCHAR menu_stop[MAX_STRING_LEN];
     WCHAR menu_language[MAX_STRING_LEN];
+    WCHAR menu_volume[MAX_STRING_LEN];
     WCHAR tooltip_stopped[MAX_STRING_LEN];
     WCHAR about_website[MAX_STRING_LEN];
     WCHAR about_coffee[MAX_STRING_LEN];
@@ -84,6 +87,7 @@ static LANG lang_en = {
     L"Previous",
     L"Stop",
     L"Language",
+    L"Volume",
     L"Stopped",
     L"Visit our website",
     L"Support us with a coffee"
@@ -99,6 +103,7 @@ static LANG lang_hu = {
     L"Előző",
     L"Leállítás",
     L"Nyelv",
+    L"Hangerő",
     L"Leállítva",
     L"Weboldal",
     L"Támogass egy kávéval"
@@ -114,6 +119,7 @@ static LANG lang_de = {
     L"Vorheriger",
     L"Stopp",
     L"Sprache",
+    L"Lautstärke",
     L"Gestoppt",
     L"Besuchen Sie unsere Webseite",
     L"Unterstützen Sie uns mit einem Kaffee"
@@ -129,6 +135,7 @@ static LANG lang_it = {
     L"Precedente",
     L"Arresta",
     L"Lingua",
+    L"Volume",
     L"Fermato",
     L"Visita il nostro sito web",
     L"Supportaci con un caffè"
@@ -144,6 +151,7 @@ static LANG lang_es = {
     L"Anterior",
     L"Detener",
     L"Idioma",
+    L"Volumen",
     L"Detenido",
     L"Visita nuestro sitio web",
     L"Apóyanos con un café"
@@ -159,6 +167,7 @@ static LANG lang_fr = {
     L"Précédent",
     L"Arrêter",
     L"Langue",
+    L"Volume",
     L"Arrêté",
     L"Visitez notre site web",
     L"Soutenez-nous avec un café"
@@ -174,6 +183,7 @@ static LANG lang_ru = {
     L"Предыдущий",
     L"Остановить",
     L"Язык",
+    L"Громкость",
     L"Остановлено",
     L"Посетите наш сайт",
     L"Поддержите нас кофе"
@@ -190,6 +200,7 @@ int isPlaying = 0;
 int isReplay = 0;
 char mp3File[MAX_PATH] = "";
 WCHAR szClassName[] = L"MP3PlayerWndClass";
+WCHAR szVolumeClassName[] = L"VolumePopup";
 DWORD pausedPosition = 0;
 
 // Playlist variables
@@ -197,12 +208,16 @@ char playlist[MAX_PATH] = "";
 char playlistFiles[MAX_TRACKS][MAX_PATH];
 int currentTrack = 0;
 int trackCount = 0;
-
+// Volume control variables
+static HWND g_hVolumeWnd = NULL;
+static HWND g_hVolumeSlider = NULL;
 void SetLanguage(LANG *newLang);
 void SaveLanguageSelectionToRegistry(void);
 BOOL LoadLanguageSelectionFromRegistry(void);
 void SaveReplayStateToRegistry(void);
 BOOL LoadReplayStateFromRegistry(void);
+void SaveVolumeToRegistry(void);
+BOOL LoadVolumeFromRegistry(void);
 void RefreshMenuText(void);
 INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void ShowAboutDialog(HWND hwndParent);
@@ -219,7 +234,9 @@ WCHAR* GetMP3SongTitle(const WCHAR* path);
 HRESULT GetMP3Duration(const WCHAR* pPath, DWORD* durationMs);
 void SaveAutoStartStateToRegistry(void);
 BOOL LoadAutoStartStateFromRegistry(void);
-
+void ShowVolumeControl(HWND hwndOwner);
+void UpdateVolumeFromSlider(void);
+LRESULT CALLBACK VolumeWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 HICON CreateIconFromText(const WCHAR* pid, COLORREF color) {
     HDC hdc = CreateCompatibleDC(NULL);
     BITMAPINFO bi = {0};
@@ -432,7 +449,7 @@ void UpdateTooltip(HWND hwnd) {
 }
 
 void SelectMP3File(HWND hwnd) {
-    OPENFILENAMEW ofn = {0};  // Using wide-char version
+    OPENFILENAMEW ofn = {0};
     WCHAR szFile[MAX_PATH * 100] = {0};
     ofn.lStructSize = sizeof(OPENFILENAMEW);
     ofn.hwndOwner = hwnd;
@@ -442,7 +459,7 @@ void SelectMP3File(HWND hwnd) {
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
 
-    if (GetOpenFileNameW(&ofn)) {  // Using wide-char version
+    if (GetOpenFileNameW(&ofn)) {
         mciSendString(L"close mp3", NULL, 0, NULL);
         isPlaying = 0;
         pausedPosition = 0;
@@ -513,8 +530,6 @@ void PlayMP3(HWND hwnd) {
     if (!isPlaying) {
         WCHAR wCommand[512];
         WCHAR wMp3File[MAX_PATH];
-
-        // Convert the file path to wide characters with proper encoding
         MultiByteToWideChar(CP_UTF8, 0, mp3File, -1, wMp3File, MAX_PATH);
 
         if (pausedPosition == 0) {
@@ -526,6 +541,9 @@ void PlayMP3(HWND hwnd) {
                 if (isReplay) {
                     mciSendString(L"set mp3 repeat", NULL, 0, NULL);
                 }
+                WCHAR cmd[64];
+                _snwprintf(cmd, 64, L"setaudio mp3 volume to %d", currentVolume);
+                mciSendString(cmd, NULL, 0, NULL);
                 mciSendString(L"play mp3 notify", NULL, 0, hwnd);
                 isPlaying = 1;
                 UpdateTooltip(hwnd);
@@ -550,7 +568,7 @@ void PauseMP3(HWND hwnd) {
     if (isPlaying) {
         WCHAR status[32];
         if (mciSendString(L"status mp3 position", status, sizeof(status)/sizeof(status[0]), NULL) == 0) {
-            pausedPosition = wcstoul(status, NULL, 10); // Store current position
+            pausedPosition = wcstoul(status, NULL, 10);
         }
         mciSendString(L"pause mp3", NULL, 0, NULL);
         isPlaying = 0;
@@ -586,7 +604,7 @@ void StopMP3(HWND hwnd) {
         pausedPosition = 0;
         KillTimer(hwnd, IDT_TIMER);
         SetTrayIcon(hwnd, hPlayIcon, g_lang->tooltip_stopped);
-        mp3File[0] = '\0';  // Töröljük az aktuális fájl nevét
+        mp3File[0] = '\0';
         RefreshMenuText();
     }
 }
@@ -734,7 +752,29 @@ BOOL LoadReplayStateFromRegistry(void) {
     }
     return FALSE;
 }
-
+void SaveVolumeToRegistry(void) {
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TrayMp3", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"Volume", 0, REG_DWORD, (const BYTE *)&currentVolume, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+BOOL LoadVolumeFromRegistry(void) {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrayMp3", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD vol, dataSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"Volume", NULL, NULL, (LPBYTE)&vol, &dataSize) == ERROR_SUCCESS) {
+            currentVolume = vol;
+            if (currentVolume > 1000) currentVolume = 1000;
+            if (currentVolume < 0) currentVolume = 0;
+            RegCloseKey(hKey);
+            return TRUE;
+        }
+        RegCloseKey(hKey);
+    }
+    currentVolume = 500;
+    return FALSE;
+}
 void SaveAutoStartStateToRegistry(void) {
     HKEY hKey;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
@@ -774,15 +814,20 @@ void RefreshMenuText(void) {
     ModifyMenuW(g_hMenu, IDM_OPEN, MF_BYCOMMAND | MF_STRING, IDM_OPEN, g_lang->menu_open);
     ModifyMenuW(g_hMenu, IDM_NEXT, MF_BYCOMMAND | MF_STRING, IDM_NEXT, g_lang->menu_next);
     ModifyMenuW(g_hMenu, IDM_PREV, MF_BYCOMMAND | MF_STRING, IDM_PREV, g_lang->menu_prev);
+    ModifyMenuW(g_hMenu, IDM_VOLUME, MF_BYCOMMAND | MF_STRING, IDM_VOLUME, g_lang->menu_volume);
+    ModifyMenuW(g_hMenu, IDM_REPLAY, MF_BYCOMMAND | MF_STRING | (isReplay ? MF_CHECKED : 0), IDM_REPLAY, g_lang->menu_replay);
+    ModifyMenuW(g_hMenu, IDM_AUTOSTART, MF_BYCOMMAND | MF_STRING | (autoStart ? MF_CHECKED : 0), IDM_AUTOSTART, L"Auto Start");
+    ModifyMenuW(g_hMenu, IDM_ABOUT, MF_BYCOMMAND | MF_STRING, IDM_ABOUT, g_lang->menu_about);
+    ModifyMenuW(g_hMenu, IDM_EXIT, MF_BYCOMMAND | MF_STRING, IDM_EXIT, g_lang->menu_exit);
     // Add all language options to the language menu
     if (g_hLangMenu) {
         ModifyMenuW(g_hLangMenu, 0, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_EN, L"English");
         ModifyMenuW(g_hLangMenu, 1, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_HU, L"Magyar");
-        ModifyMenuW(g_hLangMenu, 2, MF_BYPOSITION | MF_STRING, 204, L"Deutsch");
-        ModifyMenuW(g_hLangMenu, 3, MF_BYPOSITION | MF_STRING, 205, L"Italiano");
-        ModifyMenuW(g_hLangMenu, 4, MF_BYPOSITION | MF_STRING, 206, L"Español");
-        ModifyMenuW(g_hLangMenu, 5, MF_BYPOSITION | MF_STRING, 207, L"Français");
-        ModifyMenuW(g_hLangMenu, 6, MF_BYPOSITION | MF_STRING, 208, L"Русский");
+        ModifyMenuW(g_hLangMenu, 2, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_DE, L"Deutsch");
+        ModifyMenuW(g_hLangMenu, 3, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_IT, L"Italiano");
+        ModifyMenuW(g_hLangMenu, 4, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_ES, L"Español");
+        ModifyMenuW(g_hLangMenu, 5, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_FR, L"Français");
+        ModifyMenuW(g_hLangMenu, 6, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_RU, L"Русский");
     }
     ModifyMenuW(g_hMenu, (UINT_PTR)g_hLangMenu, MF_BYCOMMAND | MF_STRING | MF_POPUP, (UINT_PTR)g_hLangMenu, g_lang->menu_language);
     ModifyMenuW(g_hMenu, IDM_REPLAY, MF_BYCOMMAND | MF_STRING | (isReplay ? MF_CHECKED : 0), IDM_REPLAY, g_lang->menu_replay);
@@ -792,11 +837,11 @@ void RefreshMenuText(void) {
     if (g_hLangMenu) {
         CheckMenuItem(g_hLangMenu, ID_MENU_LANG_EN, MF_BYCOMMAND | (g_lang == &lang_en ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(g_hLangMenu, ID_MENU_LANG_HU, MF_BYCOMMAND | (g_lang == &lang_hu ? MF_CHECKED : MF_UNCHECKED));
-        CheckMenuItem(g_hLangMenu, 204, MF_BYCOMMAND | (g_lang == &lang_de ? MF_CHECKED : MF_UNCHECKED));
-        CheckMenuItem(g_hLangMenu, 205, MF_BYCOMMAND | (g_lang == &lang_it ? MF_CHECKED : MF_UNCHECKED));
-        CheckMenuItem(g_hLangMenu, 206, MF_BYCOMMAND | (g_lang == &lang_es ? MF_CHECKED : MF_UNCHECKED));
-        CheckMenuItem(g_hLangMenu, 207, MF_BYCOMMAND | (g_lang == &lang_fr ? MF_CHECKED : MF_UNCHECKED));
-        CheckMenuItem(g_hLangMenu, 208, MF_BYCOMMAND | (g_lang == &lang_ru ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_hLangMenu, ID_MENU_LANG_DE, MF_BYCOMMAND | (g_lang == &lang_de ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_hLangMenu, ID_MENU_LANG_IT, MF_BYCOMMAND | (g_lang == &lang_it ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_hLangMenu, ID_MENU_LANG_ES, MF_BYCOMMAND | (g_lang == &lang_es ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_hLangMenu, ID_MENU_LANG_FR, MF_BYCOMMAND | (g_lang == &lang_fr ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_hLangMenu, ID_MENU_LANG_RU, MF_BYCOMMAND | (g_lang == &lang_ru ? MF_CHECKED : MF_UNCHECKED));
     }
 }
 
@@ -884,7 +929,78 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     }
     return FALSE;
 }
+void UpdateVolumeFromSlider(void) {
+    if (g_hVolumeSlider) {
+        int pos = (int)SendMessage(g_hVolumeSlider, TBM_GETPOS, 0, 0);
+        WCHAR cmd[64];
+        _snwprintf(cmd, 64, L"setaudio mp3 volume to %d", pos);
+        mciSendString(cmd, NULL, 0, NULL);
+        currentVolume = pos;
+        SaveVolumeToRegistry();
+    }
+}
+LRESULT CALLBACK VolumeWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            g_hVolumeWnd = hwnd;
+            g_hVolumeSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS | TBS_TOOLTIPS,
+                10, 10, 180, 40, hwnd, (HMENU)IDC_VOLUME_SLIDER,
+                GetModuleHandle(NULL), NULL);
+            if (g_hVolumeSlider) {
+                SendMessage(g_hVolumeSlider, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG(0, 1000));
+                SendMessage(g_hVolumeSlider, TBM_SETPAGESIZE, 0, (LPARAM)100);
+                SendMessage(g_hVolumeSlider, TBM_SETTICFREQ, 100, 0);
+                SendMessage(g_hVolumeSlider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)currentVolume);
+            }
+            break;
+        }
+        case WM_HSCROLL: {
+            if ((HWND)lParam == g_hVolumeSlider) {
+                switch (LOWORD(wParam)) {
+                    case TB_THUMBTRACK:
+                    case TB_THUMBPOSITION:
+                    case TB_ENDTRACK:
+                        UpdateVolumeFromSlider();
+                        break;
+                }
+            }
+            break;
+        }
+        case WM_ACTIVATE:
+            if (LOWORD(wParam) == WA_INACTIVE) {
+                DestroyWindow(hwnd);
+            }
+            break;
+        case WM_DESTROY:
+            g_hVolumeWnd = NULL;
+            g_hVolumeSlider = NULL;
+            break;
+        default:
+            return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+    return 0;
+}
+void ShowVolumeControl(HWND hwndOwner) {
+    if (g_hVolumeWnd && IsWindow(g_hVolumeWnd)) {
+        SetForegroundWindow(g_hVolumeWnd);
+        return;
+    }
 
+    POINT pt;
+    GetCursorPos(&pt);
+
+    HWND hPopup = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        szVolumeClassName, g_lang->menu_volume,
+        WS_POPUP | WS_BORDER | WS_CAPTION,
+        pt.x - 100, pt.y - 60, 200, 80,
+        hwndOwner, NULL, GetModuleHandle(NULL), NULL);
+
+    if (hPopup) {
+        ShowWindow(hPopup, SW_SHOW);
+        SetForegroundWindow(hPopup);
+    }
+}
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE:
@@ -896,16 +1012,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             AppendMenuW(g_hMenu, MF_STRING, IDM_NEXT, g_lang->menu_next);
             AppendMenuW(g_hMenu, MF_STRING, IDM_PREV, g_lang->menu_prev);
             AppendMenuW(g_hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(g_hMenu, MF_STRING, IDM_VOLUME, g_lang->menu_volume);
+            AppendMenuW(g_hMenu, MF_SEPARATOR, 0, NULL);
             g_hLangMenu = CreatePopupMenu();
             AppendMenuW(g_hLangMenu, MF_STRING, ID_MENU_LANG_EN, L"English");
             AppendMenuW(g_hLangMenu, MF_STRING, ID_MENU_LANG_HU, L"Magyar");
-            AppendMenuW(g_hLangMenu, MF_STRING, 204, L"Deutsch");
-            AppendMenuW(g_hLangMenu, MF_STRING, 205, L"Italiano");
-            AppendMenuW(g_hLangMenu, MF_STRING, 206, L"Español");
-            AppendMenuW(g_hLangMenu, MF_STRING, 207, L"Français");
-            AppendMenuW(g_hLangMenu, MF_STRING, 208, L"Русский");
-            CheckMenuRadioItem(g_hLangMenu, ID_MENU_LANG_EN, ID_MENU_LANG_HU,
-                g_lang == &lang_en ? ID_MENU_LANG_EN : ID_MENU_LANG_HU, MF_BYCOMMAND);
+            AppendMenuW(g_hLangMenu, MF_STRING, ID_MENU_LANG_DE, L"Deutsch");
+            AppendMenuW(g_hLangMenu, MF_STRING, ID_MENU_LANG_IT, L"Italiano");
+            AppendMenuW(g_hLangMenu, MF_STRING, ID_MENU_LANG_ES, L"Español");
+            AppendMenuW(g_hLangMenu, MF_STRING, ID_MENU_LANG_FR, L"Français");
+            AppendMenuW(g_hLangMenu, MF_STRING, ID_MENU_LANG_RU, L"Русский");
             AppendMenuW(g_hMenu, MF_POPUP, (UINT_PTR)g_hLangMenu, g_lang->menu_language);
             LoadReplayStateFromRegistry();
             AppendMenuW(g_hMenu, MF_STRING | (isReplay ? MF_CHECKED : 0), IDM_REPLAY, g_lang->menu_replay);
@@ -936,14 +1052,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hPlayIcon);
             SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hPlayIcon);
             LoadLanguageSelectionFromRegistry();
+            LoadVolumeFromRegistry();
             RefreshMenuText();
             UpdateTooltip(GetForegroundWindow());
             break;
         case WM_TIMER:
-    		if (wParam == IDT_TIMER && isPlaying) {
-        		UpdateTooltip(hwnd);  // Simply update every second without position comparison
-    		}
-    		break;
+            if (wParam == IDT_TIMER && isPlaying) {
+                UpdateTooltip(hwnd);
+            }
+            break;
         case MM_MCINOTIFY:
             if (wParam == MCI_NOTIFY_SUCCESSFUL) {
                 if (trackCount > 1) {
@@ -1002,6 +1119,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case IDM_PREV:
                         LoadPrevTrack(hwnd);
+                        break;
+                    case IDM_VOLUME:
+                        ShowVolumeControl(hwnd);
                         break;
                     case IDM_ABOUT:
                         ShowAboutDialog(hwnd);
@@ -1079,9 +1199,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
-
+    WNDCLASSW wcVol = {0};
+    wcVol.lpfnWndProc = VolumeWndProc;
+    wcVol.hInstance = hInstance;
+    wcVol.lpszClassName = szVolumeClassName;
+    wcVol.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wcVol.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    RegisterClassW(&wcVol);
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
@@ -1095,8 +1221,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MessageBoxW(NULL, L"Window creation failed!", L"Error", MB_OK | MB_ICONERROR);
         return 1;
     }
-
+    LoadLanguageSelectionFromRegistry();
+    LoadReplayStateFromRegistry();
     LoadAutoStartStateFromRegistry();
+    LoadVolumeFromRegistry();
     RefreshMenuText();
 
     MSG msg;
