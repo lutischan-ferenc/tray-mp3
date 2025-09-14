@@ -6,13 +6,14 @@
 #include <stdio.h>
 #include <commctrl.h>
 #include <shlwapi.h>
-#include <initguid.h>
-#include <propkey.h>
-#include <shlobj.h>
-#include <propsys.h>
-#include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
+#include <mmreg.h>
+#include <mmsystem.h>
+
+// Minimap3 integráció
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#include "minimp3.h"
+#include "minimp3_ex.h"
 
 #define MAX_TRACKS 100
 #define MAX_STRING_LEN 64
@@ -21,16 +22,10 @@
 // Function declarations
 void StopMP3(HWND hwnd);
 
-DEFINE_PROPERTYKEY(PKEY_Media_Title, 0x64440492, 0x4C8B, 0x11D1, 0x8B, 0x70, 0x08, 0x00, 0x36, 0xB1, 0x1A, 0x03, 13);
-
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "propsys.lib")
-#pragma comment(lib, "mf.lib")
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "winmm.lib")
 
 enum {
     IDM_EXIT = 1001,
@@ -56,7 +51,8 @@ enum {
     ID_MENU_LANG_FR = 207,
     ID_MENU_LANG_RU = 208,
     IDT_TIMER = 2001,
-    IDC_VOLUME_SLIDER = 3000
+    IDC_VOLUME_SLIDER = 3000,
+    IDT_DECODE_TIMER = 2002
 };
 
 static int autoStart = 0;
@@ -72,6 +68,7 @@ typedef struct {
     WCHAR menu_stop[MAX_STRING_LEN];
     WCHAR menu_language[MAX_STRING_LEN];
     WCHAR menu_volume[MAX_STRING_LEN];
+    WCHAR menu_autostart[MAX_STRING_LEN];
     WCHAR tooltip_stopped[MAX_STRING_LEN];
     WCHAR about_website[MAX_STRING_LEN];
     WCHAR about_coffee[MAX_STRING_LEN];
@@ -88,6 +85,7 @@ static LANG lang_en = {
     L"Stop",
     L"Language",
     L"Volume",
+    L"Auto Start",
     L"Stopped",
     L"Visit our website",
     L"Support us with a coffee"
@@ -104,6 +102,7 @@ static LANG lang_hu = {
     L"Leállítás",
     L"Nyelv",
     L"Hangerő",
+    L"Automatikus indítás",
     L"Leállítva",
     L"Weboldal",
     L"Támogass egy kávéval"
@@ -120,6 +119,7 @@ static LANG lang_de = {
     L"Stopp",
     L"Sprache",
     L"Lautstärke",
+    L"Autostart",
     L"Gestoppt",
     L"Besuchen Sie unsere Webseite",
     L"Unterstützen Sie uns mit einem Kaffee"
@@ -136,6 +136,7 @@ static LANG lang_it = {
     L"Arresta",
     L"Lingua",
     L"Volume",
+    L"Avvio automatico",
     L"Fermato",
     L"Visita il nostro sito web",
     L"Supportaci con un caffè"
@@ -152,6 +153,7 @@ static LANG lang_es = {
     L"Detener",
     L"Idioma",
     L"Volumen",
+    L"Inicio automático",
     L"Detenido",
     L"Visita nuestro sitio web",
     L"Apóyanos con un café"
@@ -168,6 +170,7 @@ static LANG lang_fr = {
     L"Arrêter",
     L"Langue",
     L"Volume",
+    L"Démarrage automatique",
     L"Arrêté",
     L"Visitez notre site web",
     L"Soutenez-nous avec un café"
@@ -184,6 +187,7 @@ static LANG lang_ru = {
     L"Остановить",
     L"Язык",
     L"Громкость",
+    L"Автозапуск",
     L"Остановлено",
     L"Посетите наш сайт",
     L"Поддержите нас кофе"
@@ -195,22 +199,33 @@ static HMENU g_hLangMenu = NULL;
 
 NOTIFYICONDATA nid;
 HICON hPlayIcon, hPauseIcon;
-HRESULT hr = 0;
 int isPlaying = 0;
 int isReplay = 0;
 char mp3File[MAX_PATH] = "";
 WCHAR szClassName[] = L"MP3PlayerWndClass";
 WCHAR szVolumeClassName[] = L"VolumePopup";
-DWORD pausedPosition = 0;
 
 // Playlist variables
 char playlist[MAX_PATH] = "";
 char playlistFiles[MAX_TRACKS][MAX_PATH];
 int currentTrack = 0;
 int trackCount = 0;
+
 // Volume control variables
 static HWND g_hVolumeWnd = NULL;
 static HWND g_hVolumeSlider = NULL;
+
+// Minimap3 variables
+static mp3dec_ex_t mp3d;
+static HWAVEOUT hWaveOut = NULL;
+static WAVEHDR waveHeaders[4];
+static int currentHeader = 0;
+static DWORD totalDuration = 0;
+static DWORD currentPosition = 0;
+static DWORD lastUpdateTime = 0;
+static int isSeeking = 0;
+
+// Function declarations
 void SetLanguage(LANG *newLang);
 void SaveLanguageSelectionToRegistry(void);
 BOOL LoadLanguageSelectionFromRegistry(void);
@@ -231,12 +246,16 @@ void UpdateTooltip(HWND hwnd);
 void ToggleReplay(HWND hwnd);
 HICON CreateIconFromText(const WCHAR* pid, COLORREF color);
 WCHAR* GetMP3SongTitle(const WCHAR* path);
-HRESULT GetMP3Duration(const WCHAR* pPath, DWORD* durationMs);
 void SaveAutoStartStateToRegistry(void);
 BOOL LoadAutoStartStateFromRegistry(void);
 void ShowVolumeControl(HWND hwndOwner);
 void UpdateVolumeFromSlider(void);
 LRESULT CALLBACK VolumeWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+void CleanupMP3(void);
+BOOL InitMP3Decoder(const char* filename);
+void FillAudioBuffers(HWND hwnd);
+void CALLBACK WaveOutProc(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
+
 HICON CreateIconFromText(const WCHAR* pid, COLORREF color) {
     HDC hdc = CreateCompatibleDC(NULL);
     BITMAPINFO bi = {0};
@@ -301,86 +320,39 @@ void SetTrayIcon(HWND hwnd, HICON hIcon, const WCHAR* tip) {
     Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
 
-void CleanupMCI() {
-    StopMP3(GetForegroundWindow());
+void CleanupMP3() {
+    if (hWaveOut) {
+        waveOutReset(hWaveOut);
+        for (int i = 0; i < 4; i++) {
+            if (waveHeaders[i].lpData) {
+                waveOutUnprepareHeader(hWaveOut, &waveHeaders[i], sizeof(WAVEHDR));
+                free(waveHeaders[i].lpData);
+                waveHeaders[i].lpData = NULL;
+            }
+        }
+        waveOutClose(hWaveOut);
+        hWaveOut = NULL;
+    }
+
+    if (mp3d.buffer) {
+        mp3dec_ex_close(&mp3d);
+    }
+
+    isPlaying = 0;
+    currentPosition = 0;
 }
 
 WCHAR* GetMP3SongTitle(const WCHAR* path) {
-    IShellItem* psi = NULL;
-    hr = SHCreateItemFromParsingName(path, NULL, &IID_IShellItem, (void**)&psi);
-    if (SUCCEEDED(hr)) {
-        IPropertyStore* pps = NULL;
-        hr = psi->lpVtbl->QueryInterface(psi, &IID_IPropertyStore, (void**)&pps);
-        if (SUCCEEDED(hr)) {
-            PROPVARIANT var;
-            PropVariantInit(&var);
-            hr = pps->lpVtbl->GetValue(pps, &PKEY_Media_Title, &var);
-            if (SUCCEEDED(hr) && var.vt == VT_LPWSTR && var.pwszVal && wcslen(var.pwszVal) > 0) {
-                WCHAR* title = (WCHAR*)CoTaskMemAlloc((wcslen(var.pwszVal) + 1) * sizeof(WCHAR));
-                if (title) {
-                    wcscpy(title, var.pwszVal);
-                    PropVariantClear(&var);
-                    pps->lpVtbl->Release(pps);
-                    psi->lpVtbl->Release(psi);
-                    return title;
-                }
-            }
-            PropVariantClear(&var);
-            pps->lpVtbl->Release(pps);
-        }
-        psi->lpVtbl->Release(psi);
-    }
+    // Simple implementation - just return the filename
+    // In a real application, you might want to read ID3 tags here
+    static WCHAR title[MAX_PATH];
+    wcscpy(title, PathFindFileNameW(path));
 
-    return NULL;
-}
+    // Remove extension
+    WCHAR* ext = wcsrchr(title, L'.');
+    if (ext) *ext = L'\0';
 
-HRESULT GetMP3Duration(const WCHAR* pPath, DWORD* durationMs) {
-    IShellItem* psi = NULL;
-    hr = SHCreateItemFromParsingName(pPath, NULL, &IID_IShellItem, (void**)&psi);
-    if (SUCCEEDED(hr)) {
-        IPropertyStore* pps = NULL;
-        hr = psi->lpVtbl->QueryInterface(psi, &IID_IPropertyStore, (void**)&pps);
-        if (SUCCEEDED(hr)) {
-            PROPVARIANT var;
-            PropVariantInit(&var);
-            hr = pps->lpVtbl->GetValue(pps, &PKEY_Media_Duration, &var);
-            if (SUCCEEDED(hr) && var.vt == VT_UI8 && var.uhVal.QuadPart > 0) {
-                *durationMs = (DWORD)(var.uhVal.QuadPart / 10000);
-                PropVariantClear(&var);
-                pps->lpVtbl->Release(pps);
-                psi->lpVtbl->Release(psi);
-                return S_OK;
-            }
-            PropVariantClear(&var);
-            pps->lpVtbl->Release(pps);
-        }
-        psi->lpVtbl->Release(psi);
-    }
-
-    hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
-    if (FAILED(hr)) {
-        return hr;
-    }
-
-    IMFSourceReader* pReader = NULL;
-    hr = MFCreateSourceReaderFromURL(pPath, NULL, &pReader);
-    if (SUCCEEDED(hr)) {
-        PROPVARIANT var;
-        PropVariantInit(&var);
-        hr = pReader->lpVtbl->GetPresentationAttribute(pReader, MF_SOURCE_READER_MEDIASOURCE, &MF_PD_DURATION, &var);
-        if (SUCCEEDED(hr) && var.vt == VT_UI8) {
-            *durationMs = (DWORD)(var.uhVal.QuadPart / 10000);
-            PropVariantClear(&var);
-            pReader->lpVtbl->Release(pReader);
-            MFShutdown();
-            return S_OK;
-        }
-        PropVariantClear(&var);
-        pReader->lpVtbl->Release(pReader);
-    }
-
-    MFShutdown();
-    return hr;
+    return title;
 }
 
 void UpdateTooltip(HWND hwnd) {
@@ -393,59 +365,21 @@ void UpdateTooltip(HWND hwnd) {
     WCHAR wMp3File[MAX_PATH];
     MultiByteToWideChar(CP_ACP, 0, mp3File, -1, wMp3File, MAX_PATH);
     WCHAR* songTitle = GetMP3SongTitle(wMp3File);
-    if (!songTitle) {
-        songTitle = (WCHAR*)PathFindFileNameW(wMp3File);
-    }
 
-    WCHAR status[32];
-    DWORD currentPos = 0;
-    if (mciSendString(L"status mp3 position", status, sizeof(status)/sizeof(status[0]), NULL) == 0) {
-        currentPos = wcstoul(status, NULL, 10);
-    }
+    // Calculate remaining time
+    DWORD remaining = (totalDuration - currentPosition) / 1000;
+    int min = remaining / 60;
+    int sec = remaining % 60;
 
-    DWORD duration = 0;
-    if (SUCCEEDED(GetMP3Duration(wMp3File, &duration))) {
-        if (currentPos > duration) currentPos = duration;
-        int remaining = (duration - currentPos) / 1000;
-        int min = remaining / 60;
-        int sec = remaining % 60;
-
-        if (trackCount > 1) {
-            _snwprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]),
-                      L"%s (%d/%d) (%d:%02d)", songTitle, currentTrack + 1, trackCount, min, sec);
-        } else {
-            _snwprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]),
-                      L"%s (%d:%02d)", songTitle, min, sec);
-        }
+    if (trackCount > 1) {
+        _snwprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]),
+                  L"%s (%d/%d) (%d:%02d)", songTitle, currentTrack + 1, trackCount, min, sec);
     } else {
-        DWORD mciDuration = 0;
-        if (mciSendString(L"status mp3 length", status, sizeof(status)/sizeof(status[0]), NULL) == 0) {
-            mciDuration = wcstoul(status, NULL, 10);
-            int remaining = (mciDuration - currentPos) / 1000;
-            int min = remaining / 60;
-            int sec = remaining % 60;
-
-            if (trackCount > 1) {
-                _snwprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]),
-                          L"%s (%d/%d) (%d:%02d)", songTitle, currentTrack + 1, trackCount, min, sec);
-            } else {
-                _snwprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]),
-                          L"%s (%d:%02d)", songTitle, min, sec);
-            }
-        } else {
-            if (trackCount > 1) {
-                _snwprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]),
-                          L"%s (%d/%d)", songTitle, currentTrack + 1, trackCount);
-            } else {
-                wcscpy(tooltip, songTitle);
-            }
-        }
+        _snwprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]),
+                  L"%s (%d:%02d)", songTitle, min, sec);
     }
 
     SetTrayIcon(hwnd, isPlaying ? hPauseIcon : hPlayIcon, tooltip);
-    if (songTitle != PathFindFileNameW(wMp3File)) {
-        CoTaskMemFree(songTitle);
-    }
 }
 
 void SelectMP3File(HWND hwnd) {
@@ -460,9 +394,8 @@ void SelectMP3File(HWND hwnd) {
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
 
     if (GetOpenFileNameW(&ofn)) {
-        mciSendString(L"close mp3", NULL, 0, NULL);
+        CleanupMP3();
         isPlaying = 0;
-        pausedPosition = 0;
         KillTimer(hwnd, IDT_TIMER);
 
         trackCount = 0;
@@ -521,6 +454,88 @@ void SelectMP3File(HWND hwnd) {
     }
 }
 
+BOOL InitMP3Decoder(const char* filename) {
+    if (mp3d.buffer) {
+        mp3dec_ex_close(&mp3d);
+    }
+
+    if (mp3dec_ex_open(&mp3d, filename, MP3D_SEEK_TO_SAMPLE)) {
+        return FALSE;
+    }
+
+    totalDuration = (DWORD)(mp3d.samples * 1000.0 / mp3d.info.hz);
+
+    // Set up wave format
+    WAVEFORMATEX wfx = {0};
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = mp3d.info.channels;
+    wfx.nSamplesPerSec = mp3d.info.hz;
+    wfx.wBitsPerSample = 16;
+    wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
+    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+
+    // Open wave device
+    if (waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx, (DWORD_PTR)WaveOutProc,
+                   (DWORD_PTR)GetForegroundWindow(), CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
+        return FALSE;
+    }
+
+    // Set volume
+    DWORD volume = (currentVolume * 0xFFFF) / 1000;
+    waveOutSetVolume(hWaveOut, volume | (volume << 16));
+
+    // Prepare buffers
+    int bufferSize = 8192 * wfx.nBlockAlign;
+    for (int i = 0; i < 4; i++) {
+        waveHeaders[i].lpData = (LPSTR)malloc(bufferSize);
+        waveHeaders[i].dwBufferLength = bufferSize;
+        waveHeaders[i].dwFlags = 0;
+        waveOutPrepareHeader(hWaveOut, &waveHeaders[i], sizeof(WAVEHDR));
+    }
+
+    return TRUE;
+}
+
+void CALLBACK WaveOutProc(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2) {
+    HWND hwnd = (HWND)dwInstance;
+
+    if (uMsg == WOM_DONE) {
+        // A buffer has finished playing, fill it again
+        PostMessage(hwnd, WM_USER + 1, 0, 0);
+    }
+}
+
+void FillAudioBuffers(HWND hwnd) {
+    if (!isPlaying || !hWaveOut) return;
+
+    for (int i = 0; i < 4; i++) {
+        if (!(waveHeaders[i].dwFlags & WHDR_INQUEUE)) {
+            size_t samplesRead = mp3dec_ex_read(&mp3d, (mp3d_sample_t*)waveHeaders[i].lpData,
+                                              waveHeaders[i].dwBufferLength / sizeof(mp3d_sample_t));
+
+            if (samplesRead > 0) {
+                waveHeaders[i].dwBufferLength = samplesRead * sizeof(mp3d_sample_t);
+                waveOutWrite(hWaveOut, &waveHeaders[i], sizeof(WAVEHDR));
+
+                // Update position
+                currentPosition = (DWORD)(mp3d.cur_sample * 1000.0 / mp3d.info.hz);
+                lastUpdateTime = GetTickCount();
+            } else {
+                // End of file
+                if (isReplay) {
+                    mp3dec_ex_seek(&mp3d, 0);
+                    FillAudioBuffers(hwnd);
+                } else if (trackCount > 1) {
+                    LoadNextTrack(hwnd);
+                } else {
+                    StopMP3(hwnd);
+                }
+                break;
+            }
+        }
+    }
+}
+
 void PlayMP3(HWND hwnd) {
     if (strlen(mp3File) == 0) {
         SelectMP3File(hwnd);
@@ -528,80 +543,51 @@ void PlayMP3(HWND hwnd) {
     }
 
     if (!isPlaying) {
-        WCHAR wCommand[512];
-        WCHAR wMp3File[MAX_PATH];
-        MultiByteToWideChar(CP_UTF8, 0, mp3File, -1, wMp3File, MAX_PATH);
+        if (!hWaveOut) {
+            if (!InitMP3Decoder(mp3File)) {
+                MessageBoxW(hwnd, L"Failed to open MP3 file", L"Error", MB_OK | MB_ICONERROR);
+                return;
+            }
+        }
 
-        if (pausedPosition == 0) {
-            // Initial play or new track
-            mciSendString(L"close mp3", NULL, 0, NULL);
-            _snwprintf(wCommand, sizeof(wCommand) / sizeof(wCommand[0]), L"open \"%s\" type mpegvideo alias mp3", wMp3File);
-            if (mciSendString(wCommand, NULL, 0, NULL) == 0) {
-                mciSendString(L"set mp3 time format ms", NULL, 0, NULL);
-                if (isReplay) {
-                    mciSendString(L"set mp3 repeat", NULL, 0, NULL);
-                }
-                WCHAR cmd[64];
-                _snwprintf(cmd, 64, L"setaudio mp3 volume to %d", currentVolume);
-                mciSendString(cmd, NULL, 0, NULL);
-                mciSendString(L"play mp3 notify", NULL, 0, hwnd);
-                isPlaying = 1;
-                UpdateTooltip(hwnd);
-                SetTimer(hwnd, IDT_TIMER, 1000, NULL);
-                RefreshMenuText();
-            }
-        } else {
-            // Resume from paused position
-            _snwprintf(wCommand, sizeof(wCommand) / sizeof(wCommand[0]), L"play mp3 from %lu notify", pausedPosition);
-            if (mciSendString(wCommand, NULL, 0, hwnd) == 0) {
-                isPlaying = 1;
-                UpdateTooltip(hwnd);
-                SetTimer(hwnd, IDT_TIMER, 1000, NULL);
-                RefreshMenuText();
-            }
-            pausedPosition = 0;
+        if (waveOutRestart(hWaveOut) == MMSYSERR_NOERROR) {
+            isPlaying = 1;
+            FillAudioBuffers(hwnd);
+            UpdateTooltip(hwnd);
+            SetTimer(hwnd, IDT_TIMER, 1000, NULL);
+            RefreshMenuText();
         }
     }
 }
 
 void PauseMP3(HWND hwnd) {
-    if (isPlaying) {
-        WCHAR status[32];
-        if (mciSendString(L"status mp3 position", status, sizeof(status)/sizeof(status[0]), NULL) == 0) {
-            pausedPosition = wcstoul(status, NULL, 10);
-        }
-        mciSendString(L"pause mp3", NULL, 0, NULL);
-        isPlaying = 0;
-        KillTimer(hwnd, IDT_TIMER);
-        WCHAR tooltip[MAX_TOOLTIP_LEN];
-        WCHAR wMp3File[MAX_PATH];
-        MultiByteToWideChar(CP_ACP, 0, mp3File, -1, wMp3File, MAX_PATH);
-        WCHAR* songTitle = GetMP3SongTitle(wMp3File);
-        if (!songTitle) {
-            songTitle = (WCHAR*)PathFindFileNameW(wMp3File);
-        }
+    if (isPlaying && hWaveOut) {
+        if (waveOutPause(hWaveOut) == MMSYSERR_NOERROR) {
+            isPlaying = 0;
+            KillTimer(hwnd, IDT_TIMER);
 
-        if (trackCount > 1) {
-            _snwprintf(tooltip, sizeof(tooltip) / sizeof(tooltip[0]),
-                      L"%s (%d/%d)", songTitle, currentTrack + 1, trackCount);
-        } else {
-            _snwprintf(tooltip, sizeof(tooltip) / sizeof(tooltip[0]),
-                      L"%s", songTitle);
-        }
+            WCHAR tooltip[MAX_TOOLTIP_LEN];
+            WCHAR wMp3File[MAX_PATH];
+            MultiByteToWideChar(CP_ACP, 0, mp3File, -1, wMp3File, MAX_PATH);
+            WCHAR* songTitle = GetMP3SongTitle(wMp3File);
 
-        SetTrayIcon(hwnd, hPlayIcon, tooltip);
-        if (songTitle != PathFindFileNameW(wMp3File)) {
-            CoTaskMemFree(songTitle);
+            if (trackCount > 1) {
+                _snwprintf(tooltip, sizeof(tooltip) / sizeof(tooltip[0]),
+                          L"%s (%d/%d)", songTitle, currentTrack + 1, trackCount);
+            } else {
+                _snwprintf(tooltip, sizeof(tooltip) / sizeof(tooltip[0]),
+                          L"%s", songTitle);
+            }
+
+            SetTrayIcon(hwnd, hPlayIcon, tooltip);
+            RefreshMenuText();
         }
-        RefreshMenuText();
     }
 }
 
 void StopMP3(HWND hwnd) {
-    if (isPlaying || pausedPosition > 0) {
-        mciSendString(L"close mp3", NULL, 0, NULL);
-        isPlaying = 0;
-        pausedPosition = 0;
+    if (isPlaying || hWaveOut) {
+        CleanupMP3();
         KillTimer(hwnd, IDT_TIMER);
         SetTrayIcon(hwnd, hPlayIcon, g_lang->tooltip_stopped);
         mp3File[0] = '\0';
@@ -637,19 +623,13 @@ void LoadNextTrack(HWND hwnd) {
             currentTrack = 0;
         } else {
             currentTrack = trackCount - 1;
-            mciSendString(L"close mp3", NULL, 0, NULL);
-            isPlaying = 0;
-            KillTimer(hwnd, IDT_TIMER);
-            SetTrayIcon(hwnd, hPlayIcon, g_lang->tooltip_stopped);
-            RefreshMenuText();
+            StopMP3(hwnd);
             return;
         }
     }
 
     strncpy(mp3File, playlistFiles[currentTrack], MAX_PATH);
-    mciSendString(L"close mp3", NULL, 0, NULL);
-    isPlaying = 0;
-    pausedPosition = 0; // Reset paused position for new track
+    CleanupMP3();
     PlayMP3(hwnd);
 }
 
@@ -662,29 +642,18 @@ void LoadPrevTrack(HWND hwnd) {
             currentTrack = trackCount - 1;
         } else {
             currentTrack = 0;
-            mciSendString(L"close mp3", NULL, 0, NULL);
-            isPlaying = 0;
-            KillTimer(hwnd, IDT_TIMER);
-            SetTrayIcon(hwnd, hPlayIcon, g_lang->tooltip_stopped);
-            RefreshMenuText();
+            StopMP3(hwnd);
             return;
         }
     }
 
     strncpy(mp3File, playlistFiles[currentTrack], MAX_PATH);
-    mciSendString(L"close mp3", NULL, 0, NULL);
-    isPlaying = 0;
-    pausedPosition = 0; // Reset paused position for new track
+    CleanupMP3();
     PlayMP3(hwnd);
 }
 
 void ToggleReplay(HWND hwnd) {
     isReplay = !isReplay;
-    if (isPlaying && trackCount <= 1) {
-        mciSendString(L"close mp3", NULL, 0, NULL);
-        pausedPosition = 0; // Reset paused position when toggling replay
-        PlayMP3(hwnd);
-    }
     SaveReplayStateToRegistry();
     RefreshMenuText();
 }
@@ -752,6 +721,7 @@ BOOL LoadReplayStateFromRegistry(void) {
     }
     return FALSE;
 }
+
 void SaveVolumeToRegistry(void) {
     HKEY hKey;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TrayMp3", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
@@ -759,6 +729,7 @@ void SaveVolumeToRegistry(void) {
         RegCloseKey(hKey);
     }
 }
+
 BOOL LoadVolumeFromRegistry(void) {
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrayMp3", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -775,6 +746,7 @@ BOOL LoadVolumeFromRegistry(void) {
     currentVolume = 500;
     return FALSE;
 }
+
 void SaveAutoStartStateToRegistry(void) {
     HKEY hKey;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
@@ -816,9 +788,10 @@ void RefreshMenuText(void) {
     ModifyMenuW(g_hMenu, IDM_PREV, MF_BYCOMMAND | MF_STRING, IDM_PREV, g_lang->menu_prev);
     ModifyMenuW(g_hMenu, IDM_VOLUME, MF_BYCOMMAND | MF_STRING, IDM_VOLUME, g_lang->menu_volume);
     ModifyMenuW(g_hMenu, IDM_REPLAY, MF_BYCOMMAND | MF_STRING | (isReplay ? MF_CHECKED : 0), IDM_REPLAY, g_lang->menu_replay);
-    ModifyMenuW(g_hMenu, IDM_AUTOSTART, MF_BYCOMMAND | MF_STRING | (autoStart ? MF_CHECKED : 0), IDM_AUTOSTART, L"Auto Start");
+    ModifyMenuW(g_hMenu, IDM_AUTOSTART, MF_BYCOMMAND | MF_STRING | (autoStart ? MF_CHECKED : 0), IDM_AUTOSTART, g_lang->menu_autostart);
     ModifyMenuW(g_hMenu, IDM_ABOUT, MF_BYCOMMAND | MF_STRING, IDM_ABOUT, g_lang->menu_about);
     ModifyMenuW(g_hMenu, IDM_EXIT, MF_BYCOMMAND | MF_STRING, IDM_EXIT, g_lang->menu_exit);
+
     // Add all language options to the language menu
     if (g_hLangMenu) {
         ModifyMenuW(g_hLangMenu, 0, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_EN, L"English");
@@ -830,10 +803,8 @@ void RefreshMenuText(void) {
         ModifyMenuW(g_hLangMenu, 6, MF_BYPOSITION | MF_STRING, ID_MENU_LANG_RU, L"Русский");
     }
     ModifyMenuW(g_hMenu, (UINT_PTR)g_hLangMenu, MF_BYCOMMAND | MF_STRING | MF_POPUP, (UINT_PTR)g_hLangMenu, g_lang->menu_language);
-    ModifyMenuW(g_hMenu, IDM_REPLAY, MF_BYCOMMAND | MF_STRING | (isReplay ? MF_CHECKED : 0), IDM_REPLAY, g_lang->menu_replay);
-    ModifyMenuW(g_hMenu, IDM_AUTOSTART, MF_BYCOMMAND | MF_STRING | (autoStart ? MF_CHECKED : 0), IDM_AUTOSTART, L"Auto Start");
-    ModifyMenuW(g_hMenu, IDM_ABOUT, MF_BYCOMMAND | MF_STRING, IDM_ABOUT, g_lang->menu_about);
-    ModifyMenuW(g_hMenu, IDM_EXIT, MF_BYCOMMAND | MF_STRING, IDM_EXIT, g_lang->menu_exit);
+
+    // Update checkmarks
     if (g_hLangMenu) {
         CheckMenuItem(g_hLangMenu, ID_MENU_LANG_EN, MF_BYCOMMAND | (g_lang == &lang_en ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(g_hLangMenu, ID_MENU_LANG_HU, MF_BYCOMMAND | (g_lang == &lang_hu ? MF_CHECKED : MF_UNCHECKED));
@@ -929,16 +900,21 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     }
     return FALSE;
 }
+
 void UpdateVolumeFromSlider(void) {
     if (g_hVolumeSlider) {
         int pos = (int)SendMessage(g_hVolumeSlider, TBM_GETPOS, 0, 0);
-        WCHAR cmd[64];
-        _snwprintf(cmd, 64, L"setaudio mp3 volume to %d", pos);
-        mciSendString(cmd, NULL, 0, NULL);
         currentVolume = pos;
+
+        if (hWaveOut) {
+            DWORD volume = (currentVolume * 0xFFFF) / 1000;
+            waveOutSetVolume(hWaveOut, volume | (volume << 16));
+        }
+
         SaveVolumeToRegistry();
     }
 }
+
 LRESULT CALLBACK VolumeWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
@@ -981,6 +957,7 @@ LRESULT CALLBACK VolumeWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     }
     return 0;
 }
+
 void ShowVolumeControl(HWND hwndOwner) {
     if (g_hVolumeWnd && IsWindow(g_hVolumeWnd)) {
         SetForegroundWindow(g_hVolumeWnd);
@@ -1001,6 +978,7 @@ void ShowVolumeControl(HWND hwndOwner) {
         SetForegroundWindow(hPopup);
     }
 }
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE:
@@ -1053,30 +1031,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hPlayIcon);
             LoadLanguageSelectionFromRegistry();
             LoadVolumeFromRegistry();
+            LoadAutoStartStateFromRegistry();
             RefreshMenuText();
             UpdateTooltip(GetForegroundWindow());
             break;
+
         case WM_TIMER:
             if (wParam == IDT_TIMER && isPlaying) {
                 UpdateTooltip(hwnd);
             }
             break;
-        case MM_MCINOTIFY:
-            if (wParam == MCI_NOTIFY_SUCCESSFUL) {
-                if (trackCount > 1) {
-                    LoadNextTrack(hwnd);
-                } else if (isReplay) {
-                    mciSendString(L"seek mp3 to start", NULL, 0, NULL);
-                    mciSendString(L"play mp3 notify", NULL, 0, hwnd);
-                } else {
-                    mciSendString(L"close mp3", NULL, 0, NULL);
-                    isPlaying = 0;
-                    pausedPosition = 0;
-                    KillTimer(hwnd, IDT_TIMER);
-                    SetTrayIcon(hwnd, hPlayIcon, g_lang->tooltip_stopped);
-                    RefreshMenuText();
-                }
-            }
+
+        case WM_USER + 1:
+            // Buffer finished playing, fill it again
+            FillAudioBuffers(hwnd);
             break;
 
         case IDM_TRAY:
@@ -1127,13 +1095,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         ShowAboutDialog(hwnd);
                         break;
                     case IDM_EXIT:
-                        mciSendString(L"close mp3", NULL, 0, NULL);
+                        CleanupMP3();
                         Shell_NotifyIcon(NIM_DELETE, &nid);
                         DestroyMenu(g_hMenu);
                         DestroyMenu(g_hLangMenu);
                         DestroyIcon(hPlayIcon);
                         DestroyIcon(hPauseIcon);
-                        CleanupMCI();
                         PostQuitMessage(0);
                         break;
                     case ID_MENU_LANG_EN:
@@ -1174,13 +1141,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_DESTROY:
-            mciSendString(L"close mp3", NULL, 0, NULL);
+            CleanupMP3();
             Shell_NotifyIcon(NIM_DELETE, &nid);
             DestroyMenu(g_hMenu);
             DestroyMenu(g_hLangMenu);
             DestroyIcon(hPlayIcon);
             DestroyIcon(hPauseIcon);
-            CleanupMCI();
             PostQuitMessage(0);
             break;
 
@@ -1191,16 +1157,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    hr = CoInitialize(NULL);
-    if (FAILED(hr)) {
-        MessageBoxW(NULL, L"COM initialization failed!", L"Error", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
+
     WNDCLASSW wcVol = {0};
     wcVol.lpfnWndProc = VolumeWndProc;
     wcVol.hInstance = hInstance;
@@ -1208,11 +1169,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wcVol.hCursor = LoadCursor(NULL, IDC_ARROW);
     wcVol.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     RegisterClassW(&wcVol);
+
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = szClassName;
-    wc.hIcon = hPlayIcon;
     RegisterClassW(&wc);
 
     HWND hwnd = CreateWindowW(szClassName, L"TrayMp3", WS_OVERLAPPEDWINDOW,
@@ -1221,18 +1182,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MessageBoxW(NULL, L"Window creation failed!", L"Error", MB_OK | MB_ICONERROR);
         return 1;
     }
-    LoadLanguageSelectionFromRegistry();
-    LoadReplayStateFromRegistry();
-    LoadAutoStartStateFromRegistry();
-    LoadVolumeFromRegistry();
-    RefreshMenuText();
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    CoUninitialize();
-    DestroyIcon(wc.hIcon);
+
     return msg.wParam;
 }
