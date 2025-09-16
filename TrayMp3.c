@@ -463,7 +463,7 @@ BOOL InitMP3Decoder(const char* filename) {
         return FALSE;
     }
 
-    totalDuration = (DWORD)(mp3d.samples * 1000.0 / mp3d.info.hz);
+    totalDuration = (DWORD)(mp3d.samples * 1000.0 / (mp3d.info.channels * mp3d.info.hz));
 
     // Set up wave format
     WAVEFORMATEX wfx = {0};
@@ -518,7 +518,7 @@ void FillAudioBuffers(HWND hwnd) {
                 waveOutWrite(hWaveOut, &waveHeaders[i], sizeof(WAVEHDR));
 
                 // Update position
-                currentPosition = (DWORD)(mp3d.cur_sample * 1000.0 / mp3d.info.hz);
+                currentPosition = (DWORD)(mp3d.cur_sample * 1000.0 / (mp3d.info.channels * mp3d.info.hz));
                 lastUpdateTime = GetTickCount();
             } else {
                 // End of file
