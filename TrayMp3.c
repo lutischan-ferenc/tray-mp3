@@ -153,7 +153,7 @@ void ShowVolumeControl(HWND hwndOwner);
 void UpdateVolumeFromSlider(void);
 LRESULT CALLBACK VolumeWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 void CleanupMP3(void);
-BOOL InitMP3Decoder(const char* filename);
+BOOL InitMP3Decoder(const char* filename, HWND hwnd);
 void FillAudioBuffers(HWND hwnd);
 void CALLBACK WaveOutProc(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
 void ShowSeekControl(HWND hwndOwner);
@@ -358,7 +358,7 @@ void SelectMP3File(HWND hwnd) {
     }
 }
 
-BOOL InitMP3Decoder(const char* filename) {
+BOOL InitMP3Decoder(const char* filename, HWND hwnd) {
     if (mp3d.buffer) {
         mp3dec_ex_close(&mp3d);
     }
@@ -378,7 +378,7 @@ BOOL InitMP3Decoder(const char* filename) {
     wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
     wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
 
-    if (waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx, (DWORD_PTR)WaveOutProc, (DWORD_PTR)GetForegroundWindow(), CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
+    if (waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx, (DWORD_PTR)WaveOutProc, (DWORD_PTR)hwnd, CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
         return FALSE;
     }
 
@@ -444,7 +444,7 @@ void PlayMP3(HWND hwnd) {
 
     if (!isPlaying) {
         if (!hWaveOut) {
-            if (!InitMP3Decoder(mp3File)) {
+            if (!InitMP3Decoder(mp3File, hwnd)) {
                 MessageBoxW(hwnd, L"Failed to open MP3 file", L"Error", MB_OK | MB_ICONERROR);
                 return;
             }
