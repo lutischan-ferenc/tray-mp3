@@ -422,11 +422,11 @@ void FillAudioBuffers(HWND hwnd) {
                 lastUpdateTime = GetTickCount();
             } else {
                 // End of file
-                if (isReplay) {
+                if (trackCount > 1) {
+                    LoadNextTrack(hwnd);
+                } else if (isReplay) {
                     mp3dec_ex_seek(&mp3d, 0);
                     FillAudioBuffers(hwnd);
-                } else if (trackCount > 1) {
-                    LoadNextTrack(hwnd);
                 } else {
                     StopMP3(hwnd);
                 }
