@@ -11,7 +11,7 @@ STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "About TrayMp3"
 FONT 8, "Segoe UI", 400, 0
 BEGIN
-    LTEXT           "TrayMp3 v1.1.0", -1, 20, 15, 160, 10
+    LTEXT           "TrayMp3 v1.1.1", -1, 20, 15, 160, 10
     LTEXT           "A simple MP3 player for Windows", -1, 20, 30, 160, 10
     LTEXT           "Created By Ferenc Lutischan", -1, 20, 45, 160, 10
     LTEXT           "Visit website", IDC_WEBSITE, 20, 60, 160, 10, SS_NOTIFY
