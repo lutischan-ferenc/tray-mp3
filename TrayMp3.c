@@ -456,6 +456,37 @@ void PlayMP3(HWND hwnd) {
             UpdateTooltip(hwnd);
             SetTimer(hwnd, IDT_TIMER, 1000, NULL);
             RefreshMenuText();
+        } else {
+            // The audio device might have been released after a long pause.
+            // Let's try to re-initialize it.
+            if (hWaveOut) {
+                waveOutReset(hWaveOut);
+                for (int i = 0; i < 4; i++) {
+                    if (waveHeaders[i].lpData) {
+                        waveOutUnprepareHeader(hWaveOut, &waveHeaders[i], sizeof(WAVEHDR));
+                        free(waveHeaders[i].lpData);
+                        waveHeaders[i].lpData = NULL;
+                    }
+                }
+                waveOutClose(hWaveOut);
+                hWaveOut = NULL;
+            }
+            if (mp3d.buffer) {
+                mp3dec_ex_close(&mp3d);
+            }
+
+            if (InitMP3Decoder(mp3File, hwnd)) {
+                mp3dec_ex_seek(&mp3d, (uint64_t)currentPosition * mp3d.info.hz * mp3d.info.channels / 1000);
+
+                isPlaying = 1;
+                FillAudioBuffers(hwnd);
+                UpdateTooltip(hwnd);
+                SetTimer(hwnd, IDT_TIMER, 1000, NULL);
+                RefreshMenuText();
+            } else {
+                MessageBoxW(hwnd, L"Failed to resume playback.", L"Error", MB_OK | MB_ICONERROR);
+                StopMP3(hwnd);
+            }
         }
     }
 }
